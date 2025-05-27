@@ -1,0 +1,265 @@
+<?php
+// Set page title
+$pageTitle = 'Maintenance';
+
+// Include configuration and required functions
+require_once dirname(dirname(__DIR__)) . '/config/config.php';
+require_once dirname(__DIR__) . '/includes/admin-navbar.php';
+
+// Require admin access
+requireAdmin();
+
+// Get database connection
+$conn = getDbConnection();
+
+// Handle form submissions
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // Validate CSRF token
+    if (!validateCsrfToken($_POST['csrf_token'] ?? '')) {
+        setFlashMessage('error', 'Invalid request.');
+        redirect('admin/maintenance.php');
+    }
+
+    $action = $_POST['action'] ?? '';
+
+    switch ($action) {
+        case 'add_malfunction':
+            $description = sanitizeInput($_POST['description']);
+            $stationId = (int)$_POST['station_id'];
+            $state = 'reported';
+
+            // Create report
+            $sql = "INSERT INTO Reports (admin_id) VALUES (?)";
+            $stmt = $conn->prepare($sql);
+            $stmt->bind_param("i", $_SESSION['admin_id']);
+            
+            if ($stmt->execute()) {
+                $reportId = $stmt->insert_id;
+                
+                // Create malfunction record
+                $sql = "INSERT INTO Malfunctions (description, report_id, state) VALUES (?, ?, ?)";
+                $stmt = $conn->prepare($sql);
+                $stmt->bind_param("sis", $description, $reportId, $state);
+                
+                if ($stmt->execute()) {
+                    setFlashMessage('success', 'Malfunction reported successfully.');
+                } else {
+                    setFlashMessage('error', 'Error reporting malfunction.');
+                }
+            } else {
+                setFlashMessage('error', 'Error creating report.');
+            }
+            break;
+
+        case 'update_malfunction':
+            $malfunctionId = (int)$_POST['malfunction_id'];
+            $state = sanitizeInput($_POST['state']);
+
+            $sql = "UPDATE Malfunctions SET state = ? WHERE malfunction_id = ?";
+            $stmt = $conn->prepare($sql);
+            $stmt->bind_param("si", $state, $malfunctionId);
+            
+            if ($stmt->execute()) {
+                setFlashMessage('success', 'Malfunction status updated successfully.');
+            } else {
+                setFlashMessage('error', 'Error updating malfunction status.');
+            }
+            break;
+    }
+
+    redirect('admin/maintenance.php');
+}
+
+// Get stations list
+$stations = $conn->query("SELECT * FROM Stations ORDER BY station_id")->fetch_all(MYSQLI_ASSOC);
+
+// Get malfunctions list
+$malfunctions = $conn->query("
+    SELECT m.*, r.admin_id, s.address_street, s.address_city
+    FROM Malfunctions m
+    JOIN Reports r ON m.report_id = r.report_id
+    JOIN Stations s ON r.station_id = s.station_id
+    ORDER BY m.malfunction_id DESC
+")->fetch_all(MYSQLI_ASSOC);
+
+// Generate CSRF token
+$csrfToken = generateCsrfToken();
+
+// Include header
+require_once dirname(dirname(__DIR__)) . '/includes/header.php';
+?>
+
+
+<div class="container">
+    <div class="admin-container">
+        <!-- Sidebar -->
+        <div class="admin-sidebar">
+            <?php require_once dirname(dirname(__DIR__)) . '/includes/admin-navbar.php'; ?>
+        </div>
+
+        <!-- Main Content -->
+        <div class="admin-content">
+            <div class="page-header">
+                <h1>Maintenance</h1>
+                <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addMalfunctionModal">
+                    <i class="fas fa-plus"></i> Report Malfunction
+                </button>
+            </div>
+
+            <!-- Malfunctions List -->
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Reported Malfunctions</h2>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table">
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Station</th>
+                                    <th>Description</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($malfunctions as $malfunction): ?>
+                                <tr>
+                                    <td><?= $malfunction['malfunction_id'] ?></td>
+                                    <td>
+                                        <?= htmlspecialchars($malfunction['address_street']) ?>,
+                                        <?= htmlspecialchars($malfunction['address_city']) ?>
+                                    </td>
+                                    <td><?= htmlspecialchars($malfunction['description']) ?></td>
+                                    <td>
+                                        <span class="badge bg-<?= 
+                                            $malfunction['state'] === 'resolved' ? 'success' : 
+                                            ($malfunction['state'] === 'in_progress' ? 'warning' : 'danger') 
+                                        ?>">
+                                            <?= ucfirst(str_replace('_', ' ', $malfunction['state'])) ?>
+                                        </span>
+                                    </td>
+                                    <td>
+                                        <button class="btn btn-sm btn-primary update-malfunction" 
+                                                data-malfunction='<?= json_encode($malfunction) ?>'
+                                                data-bs-toggle="modal" 
+                                                data-bs-target="#updateMalfunctionModal">
+                                            <i class="fas fa-edit"></i>
+                                        </button>
+                                    </td>
+                                </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add Malfunction Modal -->
+<div class="modal fade" id="addMalfunctionModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Report Malfunction</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="<?= $csrfToken ?>">
+                <input type="hidden" name="action" value="add_malfunction">
+                
+                <div class="modal-body">
+                    <div class="form-group mb-3">
+                        <label>Station</label>
+                        <select name="station_id" class="form-control" required>
+                            <option value="">Select a station</option>
+                            <?php foreach ($stations as $station): ?>
+                            <option value="<?= $station['station_id'] ?>">
+                                <?= htmlspecialchars($station['address_street']) ?>,
+                                <?= htmlspecialchars($station['address_city']) ?>
+                            </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group mb-3">
+                        <label>Description</label>
+                        <textarea name="description" class="form-control" rows="4" required></textarea>
+                    </div>
+                </div>
+                
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Report Malfunction</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Update Malfunction Modal -->
+<div class="modal fade" id="updateMalfunctionModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Update Malfunction Status</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST">
+                <input type="hidden" name="csrf_token" value="<?= $csrfToken ?>">
+                <input type="hidden" name="action" value="update_malfunction">
+                <input type="hidden" name="malfunction_id" id="update_malfunction_id">
+                
+                <div class="modal-body">
+                    <div class="form-group mb-3">
+                        <label>Status</label>
+                        <select name="state" class="form-control" required>
+                            <option value="reported">Reported</option>
+                            <option value="in_progress">In Progress</option>
+                            <option value="resolved">Resolved</option>
+                        </select>
+                    </div>
+                    
+                    <div class="malfunction-details">
+                        <p><strong>Station:</strong> <span id="update_station"></span></p>
+                        <p><strong>Description:</strong> <span id="update_description"></span></p>
+                    </div>
+                </div>
+                
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Update Status</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Handle update malfunction button clicks
+    document.querySelectorAll('.update-malfunction').forEach(button => {
+        button.addEventListener('click', function() {
+            const malfunction = JSON.parse(this.dataset.malfunction);
+            
+            // Fill the modal with malfunction data
+            document.getElementById('update_malfunction_id').value = malfunction.malfunction_id;
+            document.getElementById('update_station').textContent = 
+                `${malfunction.address_street}, ${malfunction.address_city}`;
+            document.getElementById('update_description').textContent = malfunction.description;
+            
+            // Set current status
+            const stateSelect = document.querySelector('#updateMalfunctionModal select[name="state"]');
+            stateSelect.value = malfunction.state;
+        });
+    });
+});
+</script>
+
+<?php
+// Include footer
+require_once dirname(dirname(__DIR__)) . '/includes/footer.php';
+?>
